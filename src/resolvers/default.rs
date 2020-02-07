@@ -4,6 +4,8 @@ use blake2_rfc::blake2s::Blake2s;
 use sha2::{Digest, Sha256, Sha512};
 use rand::rngs::OsRng;
 use x25519_dalek as x25519;
+use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::aead::{NewAead, Aead, Payload};
 #[cfg(feature = "pqclean_kyber1024")] use pqcrypto_kyber::kyber1024;
 #[cfg(feature = "pqclean_kyber1024")] use pqcrypto_traits::kem::{PublicKey, SecretKey, SharedSecret, Ciphertext};
 
@@ -155,9 +157,13 @@ impl Cipher for CipherChaChaPoly {
         copy_slices!(&nonce.to_le_bytes(), &mut nonce_bytes[4..]);
 
         let mut buf = Cursor::new(out);
-        let tag = chacha20_poly1305_aead::encrypt(&self.key, &nonce_bytes, authtext, plaintext, &mut buf);
-        let tag = tag.unwrap();
-        buf.write_all(&tag).unwrap();
+        let payload = Payload {
+            msg: plaintext,
+            aad: authtext,
+        };
+        let buffer = ChaCha20Poly1305::new(self.key.into()).encrypt(&nonce_bytes.into(), payload);
+        let buffer = buffer.unwrap();
+        buf.write_all(&buffer).unwrap();
         if buf.position() > usize::max_value() as u64 {
             panic!("usize overflow");
         } else {
@@ -170,15 +176,17 @@ impl Cipher for CipherChaChaPoly {
         copy_slices!(&nonce.to_le_bytes(), &mut nonce_bytes[4..]);
 
         let mut buf = Cursor::new(out);
-        let result = chacha20_poly1305_aead::decrypt(
-            &self.key,
-            &nonce_bytes,
+        let mut buffer = ciphertext[..ciphertext.len()-TAGLEN].to_vec();
+        let result = ChaCha20Poly1305::new(self.key.into()).decrypt_in_place_detached(
+            &nonce_bytes.into(),
             authtext,
-            &ciphertext[..ciphertext.len()-TAGLEN],
-            &ciphertext[ciphertext.len()-TAGLEN..],
-            &mut buf);
+            &mut buffer,
+            ciphertext[ciphertext.len()-TAGLEN..].into(),
+        );
         match result {
             Ok(_) => {
+                buf.write(&buffer).unwrap();
+
                 if buf.position() > usize::max_value() as u64 {
                     panic!("usize overflow");
                 } else {
